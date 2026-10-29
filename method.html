@@ -116,6 +116,18 @@
       </div>
     </div>
 
+    <div id="profileBox" style="background:rgba(255, 255, 255, 0.03);border:1px solid rgba(255, 255, 255, 0.1);border-radius:16px;padding:16px 20px;margin-bottom:20px">
+      <label for="deviceProfile" style="display:block;color:#ffffff;font-weight:700;font-size:0.9rem;margin-bottom:8px">Posting profile</label>
+      <select id="deviceProfile" style="width:100%;padding:12px 14px;border-radius:10px;background:rgba(0, 0, 0, 0.45);color:#e2e8f0;border:1px solid rgba(255, 255, 255, 0.12);font-size:0.92rem">
+        <option value="auto">Auto (detect this device)</option>
+        <option value="phone">Phone (light patch)</option>
+        <option value="phone-ghost">Phone Ghost (recommended on mobile)</option>
+        <option value="pc">PC Ghost</option>
+        <option value="variant-1">Experimental (variant 1)</option>
+      </select>
+      <div id="profileHint" style="margin-top:8px;color:#94a3b8;font-size:0.78rem;line-height:1.45"></div>
+    </div>
+
     <button type="button" id="processBtn" class="primary-action-btn" style="width:100%;padding:16px;font-size:1.05rem;border-radius:14px;cursor:pointer;justify-content:center;gap:10px">
       <span>✨ Apply Method &amp; Restructure Container</span>
     </button>
