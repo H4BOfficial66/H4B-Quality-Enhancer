@@ -9,6 +9,13 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Enable CORS and Cross-Origin Isolation for WebAssembly / FFmpeg workers
+app.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+  next();
+});
+
 // Data file paths
 const counterFilePath = path.join(__dirname, 'data', 'counter.json');
 const contactsFilePath = path.join(__dirname, 'data', 'contacts.json');

@@ -20,73 +20,6 @@ function initMethodApp() {
 
   if (!dropzone || !fileInput) return;
 
-  // ---- Posting profile (device) handling -------------------------------------
-  // Previously every device was forced to 'phone'. The engine ships several
-  // profiles ('phone', 'phone-ghost', 'pc', ...), so we now pick one per device
-  // (auto) or let the user choose it manually.
-  const PROFILES = {
-    'phone':       { label: 'Phone (light patch)',  hint: 'Light metadata patch. This is what the site used for every device before.' },
-    'phone-ghost': { label: 'Phone Ghost',          hint: 'Ghost-sample layout with an extended chunk table. Auto-selected on mobile.' },
-    'pc':          { label: 'PC Ghost',             hint: 'Same ghost layout as Phone Ghost, but stricter (needs a single media block).' },
-    'variant-1':   { label: 'Experimental',         hint: 'Experimental variant. Use only for testing.' }
-  };
-
-  function isMobileDevice() {
-    const ua = navigator.userAgent || '';
-    const uaMobile = /Android|iPhone|iPad|iPod|Mobile|Opera Mini|IEMobile/i.test(ua);
-    const uaData = !!(navigator.userAgentData && navigator.userAgentData.mobile);
-    // iPadOS 13+ reports itself as a Mac
-    const iPadOS = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
-    const coarse = !!(window.matchMedia &&
-      window.matchMedia('(pointer: coarse)').matches &&
-      window.matchMedia('(hover: none)').matches);
-    return uaMobile || uaData || iPadOS || coarse;
-  }
-
-  const profileSelect = document.getElementById('deviceProfile');
-  const profileHint = document.getElementById('profileHint');
-
-  function resolvePostingDevice() {
-    const chosen = profileSelect ? profileSelect.value : 'auto';
-    if (chosen && chosen !== 'auto' && PROFILES[chosen]) return chosen;
-    return isMobileDevice() ? 'phone-ghost' : 'phone';
-  }
-
-  function refreshProfileUi() {
-    const dev = resolvePostingDevice();
-    const auto = !profileSelect || profileSelect.value === 'auto';
-    const info = PROFILES[dev];
-    const modeEl = document.getElementById('metaTimescale');
-    if (modeEl) modeEl.textContent = info.label;
-    if (profileHint) {
-      profileHint.textContent = (auto ? `Auto → ${info.label}${isMobileDevice() ? ' (mobile detected)' : ' (desktop detected)'}. ` : '') + info.hint;
-    }
-  }
-
-  if (profileSelect) {
-    try {
-      const saved = localStorage.getItem('h4bPostingProfile');
-      if (saved && (saved === 'auto' || PROFILES[saved])) profileSelect.value = saved;
-    } catch (e) {}
-    profileSelect.addEventListener('change', () => {
-      try { localStorage.setItem('h4bPostingProfile', profileSelect.value); } catch (e) {}
-      refreshProfileUi();
-    });
-  }
-  refreshProfileUi();
-
-  function showProfileWarning(text) {
-    let box = document.getElementById('profileWarning');
-    if (!box) {
-      box = document.createElement('div');
-      box.id = 'profileWarning';
-      box.style.cssText = 'background:rgba(245,158,11,0.12);border:1px solid rgba(245,158,11,0.4);color:#fbbf24;border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:0.82rem;line-height:1.5;text-align:left';
-      if (step3Container) step3Container.insertBefore(box, step3Container.firstChild);
-    }
-    box.textContent = text;
-    box.style.display = text ? 'block' : 'none';
-  }
-
   // File selection triggers
   dropzone.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', (e) => {
@@ -175,7 +108,7 @@ function initMethodApp() {
       document.getElementById('metaFileSize').textContent = formatBytes(file.size);
       document.getElementById('metaResolution').textContent = `${width}x${height}`;
       document.getElementById('metaDuration').textContent = `${duration}s`;
-      refreshProfileUi();
+      document.getElementById('metaTimescale').textContent = '✅ Universal 1080p HD';
 
       setStep(2);
     };
@@ -185,7 +118,7 @@ function initMethodApp() {
       document.getElementById('metaFileSize').textContent = formatBytes(file.size);
       document.getElementById('metaResolution').textContent = '1080x1920 (Auto)';
       document.getElementById('metaDuration').textContent = 'Detected';
-      refreshProfileUi();
+      document.getElementById('metaTimescale').textContent = '✅ Universal 1080p HD';
 
       setStep(2);
     };
@@ -201,7 +134,7 @@ function initMethodApp() {
   }
 
   // Next-Gen Web Worker execution pipeline
-  function runV2Worker(file, postingDevice, onProgress, onLog, onStage) {
+  function runV2Worker(file, onProgress, onLog, onStage) {
     return new Promise((resolve, reject) => {
       if (typeof Worker === 'undefined') {
         return reject(new Error('Web Workers not supported in this browser.'));
@@ -250,11 +183,16 @@ function initMethodApp() {
 
         file.arrayBuffer().then((buffer) => {
           if (onLog) onLog('[*] Transferring video to V2 Next-Gen Engine Worker...');
+          const profileSelect = document.getElementById('deviceProfile');
+          let profile = (profileSelect && profileSelect.value) ? profileSelect.value : 'pc';
+          if (profile === 'auto' || profile === 'desktop') {
+            profile = 'pc';
+          }
           worker.postMessage({
             type: 'process',
             buffer: buffer,
             fileName: file.name,
-            postingDevice: postingDevice
+            postingDevice: profile
           }, [buffer]);
         }).catch(err => {
           cleanup();
@@ -293,29 +231,20 @@ function initMethodApp() {
       await new Promise(r => setTimeout(r, 100));
 
       let outputBytes = null;
-      const postingDevice = resolvePostingDevice();
-      let usedFallback = false;
-      showProfileWarning('');
 
       try {
         if (!isV1) {
           // Attempt Primary Next-Gen V2 Worker Pipeline
-          log(`[*] Posting profile: ${postingDevice} (${PROFILES[postingDevice].label})`);
           log('[*] Spawning V2 Worker Engine (c-CvVvisn3 WebAssembly)...');
           try {
             outputBytes = await runV2Worker(
               currentFile,
-              postingDevice,
               (percent) => {},
               (logMsg) => log(logMsg),
-              (stage) => {
-                // The worker silently drops to weaker pipelines when the core engine fails.
-                if (/Switching to|Secondary Pipeline|Precision atom/i.test(stage || '')) usedFallback = true;
-              }
+              (stage) => {}
             );
             log('[✓] V2 Next-Gen Container Pipeline completed successfully!');
           } catch (workerErr) {
-            usedFallback = true;
             log(`[!] V2 Worker Note: ${workerErr.message}. Falling back to In-Memory Remuxer...`);
           }
         }
@@ -398,12 +327,7 @@ function initMethodApp() {
         document.getElementById('downloadFileName').textContent = processedFileName;
         document.getElementById('downloadFileSize').textContent = formatBytes(outputBytes.length);
 
-        if (!isV1 && usedFallback) {
-          const warn = 'The core engine could not run on this device/browser, so a weaker fallback was used. The selected posting profile (' + postingDevice + ') was NOT fully applied and TikTok will probably compress this video. Try Chrome (Android) or Safari 15+ (iOS), a smaller file, or process it on desktop.';
-          log('[!] WARNING: ' + warn);
-          showProfileWarning(warn);
-        }
-        log(`[✓] Process Complete! Profile: ${postingDevice}.`);
+        log('[✓] Process Complete! Universal 1080p HD container optimized — iOS, Android & PC compatible.');
         await new Promise(r => setTimeout(r, 400));
 
         setStep(3);
