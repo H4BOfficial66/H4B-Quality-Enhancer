@@ -9,10 +9,14 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Enable CORS and Cross-Origin Isolation for WebAssembly / FFmpeg workers
+// Enable Cross-Origin Isolation ONLY for engine/worker files (WebAssembly / FFmpeg)
+// AdSense requires credentialed cross-origin requests, so we must NOT set COEP on HTML pages
 app.use((req, res, next) => {
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+  const p = req.path.toLowerCase();
+  if (p.startsWith('/engine/') || p.endsWith('.wasm') || p.includes('worker')) {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless');
+  }
   next();
 });
 

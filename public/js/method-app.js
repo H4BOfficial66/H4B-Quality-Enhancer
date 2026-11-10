@@ -284,32 +284,24 @@ function initMethodApp() {
           const arrayBuffer = await bufferPromise;
           const inputBytes = new Uint8Array(arrayBuffer);
 
-          // 1. Try Classic Method timing engine (lossless timing & clean AVC High profile 5.1 container)
-          if (typeof window.transformVideo === 'function') {
-            log('[*] Engaging Classic Method timing engine...');
+          // 1. Precision MP4 atom timing engine (lossless timing & clean AVC High profile 5.1 container)
+          // Avoids fake-frame inflation (multiplier=10) that triggers TikTok 540p downgrade
+          if (typeof window.remuxMp4Boxes === 'function') {
+            log('[*] Engaging precision MP4 atom timing engine...');
             try {
-              const res = window.transformVideo(arrayBuffer, 10, 'H4B', (info) => log(`[*] ${info}`));
-              if (res && res.success && (res.outputBytes || res.video)) {
-                outputBytes = res.outputBytes || res.video;
+              outputBytes = window.remuxMp4Boxes(inputBytes, { extendTiming: false });
+              if (outputBytes && outputBytes.length > 0) {
+                log('[✓] Precision container atom optimization completed successfully!');
               }
-            } catch (tErr) {
-              log(`[!] Timing engine note: ${tErr.message}`);
+            } catch (rErr) {
+              log(`[!] Remux note: ${rErr.message}`);
             }
           }
 
-          // 2. Secondary fallback: in-memory box remuxer
+          // 2. Secondary fallback: lossless container pass-through
           if (!outputBytes || outputBytes.length === 0) {
-            log('[*] Engaging precision MP4 atom timing engine...');
-            if (typeof window.remuxMp4Boxes === 'function') {
-              try {
-                outputBytes = window.remuxMp4Boxes(inputBytes, { extendTiming: false });
-              } catch (rErr) {
-                log(`[!] Remux note: ${rErr.message}`);
-              }
-            }
-            if (!outputBytes || outputBytes.length === 0) {
-              outputBytes = inputBytes;
-            }
+            log('[*] Preserving clean MP4 container stream...');
+            outputBytes = inputBytes;
           }
         }
 
