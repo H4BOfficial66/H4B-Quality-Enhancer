@@ -110,6 +110,29 @@ function initMethodApp() {
       document.getElementById('metaDuration').textContent = `${duration}s`;
       document.getElementById('metaTimescale').textContent = '✅ Universal 1080p HD';
 
+      const warnBox = document.getElementById('aspectRatioWarning');
+      if (warnBox) {
+        if (width > height) {
+          warnBox.style.display = 'block';
+          warnBox.style.background = 'rgba(239, 68, 68, 0.12)';
+          warnBox.style.border = '1px solid rgba(239, 68, 68, 0.35)';
+          warnBox.style.color = '#fca5a5';
+          warnBox.innerHTML = `⚠️ <strong>Landscape Detected (${width}x${height}):</strong> TikTok is a <strong>9:16 vertical platform</strong> (1080x1920). Horizontal videos are fitted to mobile screens by TikTok and downscaled to <strong>540p</strong>! For 1080p HD, export your project in <strong>1080x1920 (9:16 Portrait)</strong>.`;
+        } else if (width === 1080 && height === 1920) {
+          warnBox.style.display = 'block';
+          warnBox.style.background = 'rgba(34, 197, 94, 0.12)';
+          warnBox.style.border = '1px solid rgba(34, 197, 94, 0.35)';
+          warnBox.style.color = '#86efac';
+          warnBox.innerHTML = `✅ <strong>Perfect TikTok Aspect Ratio:</strong> 1080x1920 (9:16 Portrait) detected. Full 1080p HD will be maintained!`;
+        } else {
+          warnBox.style.display = 'block';
+          warnBox.style.background = 'rgba(245, 158, 11, 0.12)';
+          warnBox.style.border = '1px solid rgba(245, 158, 11, 0.35)';
+          warnBox.style.color = '#fcd34d';
+          warnBox.innerHTML = `ℹ️ <strong>Custom Dimensions (${width}x${height}):</strong> TikTok standard is <strong>1080x1920 (9:16)</strong>. If non-standard or wider than tall, TikTok may compress it to 540p.`;
+        }
+      }
+
       setStep(2);
     };
 
