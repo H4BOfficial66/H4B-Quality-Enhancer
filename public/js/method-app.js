@@ -216,7 +216,7 @@ function initMethodApp() {
         }
       }
 
-      // Process Video Track: ensure Track ID = 1, Level 5.1 in avcC
+      // Process Video Track: ensure Track ID = 1, Level 5.1 in avcC, timescale x256
       if (vTrak) {
         const tkhdIdx = findFourCC(vTrak, 'tkhd');
         if (tkhdIdx !== -1) {
@@ -233,7 +233,59 @@ function initMethodApp() {
             vTrak[avcIdx + 15] = 0x33;
           }
         }
-        if (onLog) onLog('[*] Normalized Video to Track 1 (AVC High Profile Level 5.1)');
+
+        // RTX Timescale Trick: multiply video timescale by 256
+        // This tricks TikTok's ingest into preserving 1080p quality
+        // mdhd timescale: 60 -> 15360, duration: x256, stts delta: x256
+        const TSCALE_MULT = 256;
+        const mdhdIdx = findFourCC(vTrak, 'mdhd');
+        if (mdhdIdx !== -1) {
+          const mdhdVer = vTrak[mdhdIdx + 4];
+          const mdhdTsOff = mdhdIdx + 4 + (mdhdVer === 1 ? 20 : 12);
+          const origTs = readU32(vTrak, mdhdTsOff);
+          const newTs = origTs * TSCALE_MULT;
+          writeU32(vTrak, mdhdTsOff, newTs);
+          // Scale duration
+          if (mdhdVer === 1) {
+            const durHi = readU32(vTrak, mdhdTsOff + 4);
+            const durLo = readU32(vTrak, mdhdTsOff + 8);
+            const dur64 = BigInt(durHi) * 4294967296n + BigInt(durLo);
+            const newDur64 = dur64 * BigInt(TSCALE_MULT);
+            writeU32(vTrak, mdhdTsOff + 4, Number(newDur64 / 4294967296n) >>> 0);
+            writeU32(vTrak, mdhdTsOff + 8, Number(newDur64 % 4294967296n) >>> 0);
+          } else {
+            const origDur = readU32(vTrak, mdhdTsOff + 4);
+            writeU32(vTrak, mdhdTsOff + 4, (origDur * TSCALE_MULT) >>> 0);
+          }
+          if (onLog) onLog('[*] Timescale upgrade: ' + origTs + ' -> ' + newTs + ' (x' + TSCALE_MULT + ')');
+        }
+
+        // Scale stts (sample duration) deltas by TSCALE_MULT
+        const sttsIdx = findFourCC(vTrak, 'stts');
+        if (sttsIdx !== -1) {
+          const sttsEntryCount = readU32(vTrak, sttsIdx + 8);
+          for (let i = 0; i < sttsEntryCount; i++) {
+            const deltaOff = sttsIdx + 12 + i * 8 + 4;
+            if (deltaOff + 4 > vTrak.length) break;
+            const origDelta = readU32(vTrak, deltaOff);
+            writeU32(vTrak, deltaOff, (origDelta * TSCALE_MULT) >>> 0);
+          }
+          if (onLog) onLog('[*] Scaled ' + sttsEntryCount + ' stts entries (delta x' + TSCALE_MULT + ')');
+        }
+
+        // Scale ctts (composition time offset) if present
+        const cttsIdx = findFourCC(vTrak, 'ctts');
+        if (cttsIdx !== -1) {
+          const cttsEntryCount = readU32(vTrak, cttsIdx + 8);
+          for (let i = 0; i < cttsEntryCount; i++) {
+            const cOffOff = cttsIdx + 12 + i * 8 + 4;
+            if (cOffOff + 4 > vTrak.length) break;
+            const origOff = readU32(vTrak, cOffOff);
+            writeU32(vTrak, cOffOff, (origOff * TSCALE_MULT) >>> 0);
+          }
+        }
+
+        if (onLog) onLog('[*] Normalized Video to Track 1 (AVC High Profile Level 5.1 + RTX Timescale)');
       }
 
       // Process Audio Track: ensure Track ID = 2
