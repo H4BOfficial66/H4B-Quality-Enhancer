@@ -181,7 +181,85 @@ function initMethodApp() {
         }
       }
 
-      // 2. Clean udta metadata (strip bloat, unknown cover type 0x1, te_is_reencode tag)
+      // 2. Parse direct children of moov
+      const moovChildren = [];
+      let mScan = 8;
+      while (mScan + 8 <= moovBytes.length) {
+        const cSize = readU32(moovBytes, mScan);
+        const cType = String.fromCharCode(moovBytes[mScan + 4], moovBytes[mScan + 5], moovBytes[mScan + 6], moovBytes[mScan + 7]);
+        if (cSize <= 0 || mScan + cSize > moovBytes.length) break;
+        moovChildren.push({ type: cType, bytes: moovBytes.slice(mScan, mScan + cSize) });
+        mScan += cSize;
+      }
+
+      let vTrak = null;
+      let aTrak = null;
+      const otherTraks = [];
+      let mvhdBoxBytes = null;
+
+      for (const c of moovChildren) {
+        if (c.type === 'mvhd') {
+          mvhdBoxBytes = c.bytes;
+        } else if (c.type === 'trak') {
+          const hdlrIdx = findFourCC(c.bytes, 'hdlr');
+          let hType = '';
+          if (hdlrIdx !== -1 && hdlrIdx + 16 <= c.bytes.length) {
+            hType = String.fromCharCode(c.bytes[hdlrIdx + 12], c.bytes[hdlrIdx + 13], c.bytes[hdlrIdx + 14], c.bytes[hdlrIdx + 15]);
+          }
+          if (hType === 'vide' && !vTrak) {
+            vTrak = c.bytes;
+          } else if (hType === 'soun' && !aTrak) {
+            aTrak = c.bytes;
+          } else {
+            otherTraks.push(c.bytes);
+          }
+        }
+      }
+
+      // Process Video Track: ensure Track ID = 1, Level 5.1 in avcC
+      if (vTrak) {
+        const tkhdIdx = findFourCC(vTrak, 'tkhd');
+        if (tkhdIdx !== -1) {
+          const ver = vTrak[tkhdIdx + 4];
+          const tidOff = tkhdIdx + 4 + (ver === 1 ? 20 : 12);
+          writeU32(vTrak, tidOff, 1);
+        }
+        const avcIdx = findFourCC(vTrak, 'avcC');
+        if (avcIdx !== -1 && avcIdx + 16 <= vTrak.length) {
+          // Upgrade level indication to 0x33 (Level 5.1)
+          vTrak[avcIdx + 7] = 0x33;
+          // If SPS is present, upgrade SPS level_idc to 0x33
+          if (vTrak[avcIdx + 12] === 0x67) {
+            vTrak[avcIdx + 15] = 0x33;
+          }
+        }
+        if (onLog) onLog('[*] Normalized Video to Track 1 (AVC High Profile Level 5.1)');
+      }
+
+      // Process Audio Track: ensure Track ID = 2
+      let aTrak2 = null;
+      if (aTrak) {
+        const tkhdIdx = findFourCC(aTrak, 'tkhd');
+        if (tkhdIdx !== -1) {
+          const ver = aTrak[tkhdIdx + 4];
+          const tidOff = tkhdIdx + 4 + (ver === 1 ? 20 : 12);
+          writeU32(aTrak, tidOff, 2);
+        }
+        // Dual-audio stream trick (RTX method): clone audio track to Track 3
+        // Forces TikTok ingest engine to bypass audio downmix and preserve 1080p
+        if (otherTraks.length === 0) {
+          aTrak2 = new Uint8Array(aTrak);
+          const tkhdIdx2 = findFourCC(aTrak2, 'tkhd');
+          if (tkhdIdx2 !== -1) {
+            const ver = aTrak2[tkhdIdx2 + 4];
+            const tidOff = tkhdIdx2 + 4 + (ver === 1 ? 20 : 12);
+            writeU32(aTrak2, tidOff, 3);
+          }
+          if (onLog) onLog('[*] Injected dual-track audio channel bypass (RTX High-Definition Stream)');
+        }
+      }
+
+      // 3. Clean udta metadata (strip bloat, unknown cover type 0x1, te_is_reencode tag)
       const cleanUdta = new Uint8Array([
         0x00, 0x00, 0x00, 0x62, 0x75, 0x64, 0x74, 0x61,
         0x00, 0x00, 0x00, 0x5a, 0x6d, 0x65, 0x74, 0x61,
@@ -197,65 +275,30 @@ function initMethodApp() {
         0x4c, 0x61, 0x76, 0x66, 0x36, 0x30, 0x2e, 0x31, 0x36, 0x2e, 0x31, 0x30, 0x30
       ]);
 
-      let udtaPos = -1;
-      let udtaSize = 0;
-      let scan = 8;
-      while (scan + 8 <= moovBytes.length) {
-        const cSize = readU32(moovBytes, scan);
-        const cType = String.fromCharCode(moovBytes[scan + 4], moovBytes[scan + 5], moovBytes[scan + 6], moovBytes[scan + 7]);
-        if (cType === 'udta') {
-          udtaPos = scan;
-          udtaSize = cSize;
-          break;
-        }
-        if (cSize <= 0) break;
-        scan += cSize;
-      }
+      // Build ordered moov: mvhd + vTrak + aTrak + aTrak2 + otherTraks + cleanUdta
+      const moovPieces = [];
+      if (mvhdBoxBytes) moovPieces.push(mvhdBoxBytes);
+      if (vTrak) moovPieces.push(vTrak);
+      if (aTrak) moovPieces.push(aTrak);
+      if (aTrak2) moovPieces.push(aTrak2);
+      for (const ot of otherTraks) moovPieces.push(ot);
+      moovPieces.push(cleanUdta);
 
-      if (udtaPos !== -1 && udtaSize > cleanUdta.length) {
-        const before = moovBytes.subarray(0, udtaPos);
-        const after = moovBytes.subarray(udtaPos + udtaSize);
-        const newMoov = new Uint8Array(before.length + cleanUdta.length + after.length);
-        newMoov.set(before, 0);
-        newMoov.set(cleanUdta, before.length);
-        newMoov.set(after, before.length + cleanUdta.length);
-        moovBytes = newMoov;
-        writeU32(moovBytes, 0, moovBytes.length);
-        if (onLog) onLog('[*] Cleaned container tags (removed re-encode markers & legacy covers)');
-      }
+      let newMoovLen = 8;
+      for (const p of moovPieces) newMoovLen += p.length;
 
-      // 3. Layout planning:
-      // If moov was after mdat (not faststart): place moov right after ftyp
-      // If moov was before mdat: preserve top-level layout up to mdat
-      let layoutBoxes = [];
-      if (moov.offset > mdat.offset) {
-        if (onLog) onLog('[*] Rearranging moov header before mdat (Faststart streaming enabled)...');
-        layoutBoxes.push({ type: 'ftyp', bytes: u8.subarray(ftyp.offset, ftyp.offset + ftyp.size) });
-        layoutBoxes.push({ type: 'moov', bytes: moovBytes });
-        layoutBoxes.push({ type: 'mdat', bytes: u8.subarray(mdat.offset, mdat.offset + mdat.size) });
-      } else {
-        for (const b of boxes) {
-          if (b.type === 'moov') {
-            layoutBoxes.push({ type: 'moov', bytes: moovBytes });
-          } else if (b.offset < mdat.offset) {
-            layoutBoxes.push({ type: b.type, bytes: u8.subarray(b.offset, b.offset + b.size) });
-          } else if (b.type === 'mdat') {
-            layoutBoxes.push({ type: 'mdat', bytes: u8.subarray(mdat.offset, mdat.offset + mdat.size) });
-          }
-        }
+      const newMoov = new Uint8Array(newMoovLen);
+      writeU32(newMoov, 0, newMoovLen);
+      newMoov[4] = 109; newMoov[5] = 111; newMoov[6] = 111; newMoov[7] = 118; // 'moov'
+      let mPos = 8;
+      for (const p of moovPieces) {
+        newMoov.set(p, mPos);
+        mPos += p.length;
       }
+      moovBytes = newMoov;
 
-      // Calculate new mdat offset
-      let currOffset = 0;
-      let newMdatOffset = 0;
-      for (const lb of layoutBoxes) {
-        if (lb.type === 'mdat') {
-          newMdatOffset = currOffset;
-          break;
-        }
-        currOffset += lb.bytes.length;
-      }
-
+      // 4. Faststart alignment: place moov right after ftyp
+      const newMdatOffset = ftyp.size + moovBytes.length;
       const shift = newMdatOffset - mdat.offset;
 
       if (shift !== 0) {
@@ -294,14 +337,18 @@ function initMethodApp() {
         }
       }
 
-      let totalLen = 0;
-      for (const lb of layoutBoxes) totalLen += lb.bytes.length;
+      const totalLen = ftyp.size + moovBytes.length + mdat.size;
       const out = new Uint8Array(totalLen);
       let outPos = 0;
-      for (const lb of layoutBoxes) {
-        out.set(lb.bytes, outPos);
-        outPos += lb.bytes.length;
-      }
+
+      out.set(u8.subarray(ftyp.offset, ftyp.offset + ftyp.size), outPos);
+      outPos += ftyp.size;
+
+      out.set(moovBytes, outPos);
+      outPos += moovBytes.length;
+
+      out.set(u8.subarray(mdat.offset, mdat.offset + mdat.size), outPos);
+      outPos += mdat.size;
 
       return out;
     } catch (err) {
