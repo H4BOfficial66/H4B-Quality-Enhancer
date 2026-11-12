@@ -81,6 +81,235 @@ function initMethodApp() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
+  function postProcessMp4(u8, onLog) {
+    try {
+      const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+      let pos = 0;
+      const boxes = [];
+      while (pos + 8 <= u8.length) {
+        let size = view.getUint32(pos);
+        const type = String.fromCharCode(u8[pos + 4], u8[pos + 5], u8[pos + 6], u8[pos + 7]);
+        let hdr = 8;
+        if (size === 1) {
+          if (pos + 16 > u8.length) break;
+          const hi = view.getUint32(pos + 8);
+          const lo = view.getUint32(pos + 12);
+          size = hi * 4294967296 + lo;
+          hdr = 16;
+        } else if (size === 0) {
+          size = u8.length - pos;
+        }
+        if (size <= 0 || pos + size > u8.length) {
+          if (size > 0 && pos + size <= u8.length) {
+            boxes.push({ type, offset: pos, size, hdr });
+          }
+          break;
+        }
+        boxes.push({ type, offset: pos, size, hdr });
+        pos += size;
+      }
+
+      const ftyp = boxes.find(b => b.type === 'ftyp');
+      const moov = boxes.find(b => b.type === 'moov');
+      const mdat = boxes.find(b => b.type === 'mdat');
+
+      if (!ftyp || !moov || !mdat) {
+        return u8;
+      }
+
+      function findFourCC(bytes, fourCC, start = 0, end = bytes.length) {
+        const b0 = fourCC.charCodeAt(0), b1 = fourCC.charCodeAt(1), b2 = fourCC.charCodeAt(2), b3 = fourCC.charCodeAt(3);
+        for (let i = start; i <= end - 4; i++) {
+          if (bytes[i] === b0 && bytes[i + 1] === b1 && bytes[i + 2] === b2 && bytes[i + 3] === b3) return i;
+        }
+        return -1;
+      }
+
+      function readU32(bytes, off) {
+        return ((bytes[off] << 24) | (bytes[off + 1] << 16) | (bytes[off + 2] << 8) | bytes[off + 3]) >>> 0;
+      }
+
+      function writeU32(bytes, off, val) {
+        bytes[off] = (val >>> 24) & 0xff;
+        bytes[off + 1] = (val >>> 16) & 0xff;
+        bytes[off + 2] = (val >>> 8) & 0xff;
+        bytes[off + 3] = val & 0xff;
+      }
+
+      let moovBytes = u8.slice(moov.offset, moov.offset + moov.size);
+
+      // 1. Fix mvhd duration
+      const mvhdTypeIdx = findFourCC(moovBytes, 'mvhd');
+      if (mvhdTypeIdx !== -1) {
+        const ver = moovBytes[mvhdTypeIdx + 4];
+        const tsOff = mvhdTypeIdx + 4 + (ver === 1 ? 20 : 12);
+        const mvhdTimescale = readU32(moovBytes, tsOff);
+        let maxDurationSec = 0;
+        let scanPos = 0;
+        while (true) {
+          const mdhdTypeIdx = findFourCC(moovBytes, 'mdhd', scanPos);
+          if (mdhdTypeIdx === -1) break;
+          const mdhdVer = moovBytes[mdhdTypeIdx + 4];
+          const mdhdTsOff = mdhdTypeIdx + 4 + (mdhdVer === 1 ? 20 : 12);
+          const mdhdTs = readU32(moovBytes, mdhdTsOff);
+          let mdhdDur = 0;
+          if (mdhdVer === 1) {
+            const hi = readU32(moovBytes, mdhdTsOff + 4);
+            const lo = readU32(moovBytes, mdhdTsOff + 8);
+            mdhdDur = hi * 4294967296 + lo;
+          } else {
+            mdhdDur = readU32(moovBytes, mdhdTsOff + 4);
+          }
+          if (mdhdTs > 0 && mdhdDur > 0) {
+            const durSec = mdhdDur / mdhdTs;
+            if (durSec > maxDurationSec) maxDurationSec = durSec;
+          }
+          scanPos = mdhdTypeIdx + 4;
+        }
+
+        if (maxDurationSec > 0 && mvhdTimescale > 0) {
+          const realMvhdDur = Math.round(maxDurationSec * mvhdTimescale);
+          if (ver === 1) {
+            const hi = Math.floor(realMvhdDur / 4294967296);
+            const lo = (realMvhdDur % 4294967296) >>> 0;
+            writeU32(moovBytes, tsOff + 4, hi);
+            writeU32(moovBytes, tsOff + 8, lo);
+          } else {
+            writeU32(moovBytes, tsOff + 4, realMvhdDur >>> 0);
+          }
+          if (onLog) onLog(`[*] Aligned container timeline duration: ${maxDurationSec.toFixed(2)}s`);
+        }
+      }
+
+      // 2. Clean udta metadata (strip bloat, unknown cover type 0x1, te_is_reencode tag)
+      const cleanUdta = new Uint8Array([
+        0x00, 0x00, 0x00, 0x62, 0x75, 0x64, 0x74, 0x61,
+        0x00, 0x00, 0x00, 0x5a, 0x6d, 0x65, 0x74, 0x61,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x21, 0x68, 0x64, 0x6c, 0x72,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x6d, 0x64, 0x69, 0x72, 0x61, 0x70, 0x70, 0x6c,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x2d, 0x69, 0x6c, 0x73, 0x74,
+        0x00, 0x00, 0x00, 0x25, 0xa9, 0x74, 0x6f, 0x6f,
+        0x00, 0x00, 0x00, 0x1d, 0x64, 0x61, 0x74, 0x61,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x4c, 0x61, 0x76, 0x66, 0x36, 0x30, 0x2e, 0x31, 0x36, 0x2e, 0x31, 0x30, 0x30
+      ]);
+
+      let udtaPos = -1;
+      let udtaSize = 0;
+      let scan = 8;
+      while (scan + 8 <= moovBytes.length) {
+        const cSize = readU32(moovBytes, scan);
+        const cType = String.fromCharCode(moovBytes[scan + 4], moovBytes[scan + 5], moovBytes[scan + 6], moovBytes[scan + 7]);
+        if (cType === 'udta') {
+          udtaPos = scan;
+          udtaSize = cSize;
+          break;
+        }
+        if (cSize <= 0) break;
+        scan += cSize;
+      }
+
+      if (udtaPos !== -1 && udtaSize > cleanUdta.length) {
+        const before = moovBytes.subarray(0, udtaPos);
+        const after = moovBytes.subarray(udtaPos + udtaSize);
+        const newMoov = new Uint8Array(before.length + cleanUdta.length + after.length);
+        newMoov.set(before, 0);
+        newMoov.set(cleanUdta, before.length);
+        newMoov.set(after, before.length + cleanUdta.length);
+        moovBytes = newMoov;
+        writeU32(moovBytes, 0, moovBytes.length);
+        if (onLog) onLog('[*] Cleaned container tags (removed re-encode markers & legacy covers)');
+      }
+
+      // 3. Layout planning:
+      // If moov was after mdat (not faststart): place moov right after ftyp
+      // If moov was before mdat: preserve top-level layout up to mdat
+      let layoutBoxes = [];
+      if (moov.offset > mdat.offset) {
+        if (onLog) onLog('[*] Rearranging moov header before mdat (Faststart streaming enabled)...');
+        layoutBoxes.push({ type: 'ftyp', bytes: u8.subarray(ftyp.offset, ftyp.offset + ftyp.size) });
+        layoutBoxes.push({ type: 'moov', bytes: moovBytes });
+        layoutBoxes.push({ type: 'mdat', bytes: u8.subarray(mdat.offset, mdat.offset + mdat.size) });
+      } else {
+        for (const b of boxes) {
+          if (b.type === 'moov') {
+            layoutBoxes.push({ type: 'moov', bytes: moovBytes });
+          } else if (b.offset < mdat.offset) {
+            layoutBoxes.push({ type: b.type, bytes: u8.subarray(b.offset, b.offset + b.size) });
+          } else if (b.type === 'mdat') {
+            layoutBoxes.push({ type: 'mdat', bytes: u8.subarray(mdat.offset, mdat.offset + mdat.size) });
+          }
+        }
+      }
+
+      // Calculate new mdat offset
+      let currOffset = 0;
+      let newMdatOffset = 0;
+      for (const lb of layoutBoxes) {
+        if (lb.type === 'mdat') {
+          newMdatOffset = currOffset;
+          break;
+        }
+        currOffset += lb.bytes.length;
+      }
+
+      const shift = newMdatOffset - mdat.offset;
+
+      if (shift !== 0) {
+        // Adjust stco (32-bit chunk offsets)
+        let sScan = 0;
+        while (true) {
+          const idx = findFourCC(moovBytes, 'stco', sScan);
+          if (idx === -1) break;
+          const sz = readU32(moovBytes, idx - 4);
+          const count = readU32(moovBytes, idx + 8);
+          for (let i = 0; i < count; i++) {
+            const off = idx + 12 + i * 4;
+            const cur = readU32(moovBytes, off);
+            writeU32(moovBytes, off, (cur + shift) >>> 0);
+          }
+          sScan = idx + sz;
+        }
+
+        // Adjust co64 (64-bit chunk offsets)
+        sScan = 0;
+        while (true) {
+          const idx = findFourCC(moovBytes, 'co64', sScan);
+          if (idx === -1) break;
+          const sz = readU32(moovBytes, idx - 4);
+          const count = readU32(moovBytes, idx + 8);
+          for (let i = 0; i < count; i++) {
+            const off = idx + 12 + i * 8;
+            const hi = readU32(moovBytes, off);
+            const lo = readU32(moovBytes, off + 4);
+            const val64 = BigInt(hi) * 4294967296n + BigInt(lo);
+            const newVal64 = val64 + BigInt(shift);
+            writeU32(moovBytes, off, Number(newVal64 / 4294967296n) >>> 0);
+            writeU32(moovBytes, off + 4, Number(newVal64 % 4294967296n) >>> 0);
+          }
+          sScan = idx + sz;
+        }
+      }
+
+      let totalLen = 0;
+      for (const lb of layoutBoxes) totalLen += lb.bytes.length;
+      const out = new Uint8Array(totalLen);
+      let outPos = 0;
+      for (const lb of layoutBoxes) {
+        out.set(lb.bytes, outPos);
+        outPos += lb.bytes.length;
+      }
+
+      return out;
+    } catch (err) {
+      console.warn('[H4B] postProcessMp4 skipped due to error:', err);
+      return u8;
+    }
+  }
+
   function handleFile(file) {
     const validExtensions = ['.mp4', '.mov', '.mkv', '.webm'];
     const nameLower = file.name.toLowerCase();
@@ -330,6 +559,15 @@ function initMethodApp() {
 
         if (!outputBytes || outputBytes.length === 0) {
           throw new Error('Container optimization failed. Empty output.');
+        }
+
+        // Apply TikTok 1080p post-processing: Faststart (moov-first) + mvhd duration fix + clean metadata
+        try {
+          log('[*] Finalizing TikTok 1080p faststart alignment & clean container metadata...');
+          outputBytes = postProcessMp4(outputBytes, log);
+          log('[✓] TikTok 1080p faststart container ready!');
+        } catch (ppErr) {
+          console.warn('[H4B] Post-process warning:', ppErr);
         }
 
         // Increment global counter
