@@ -81,7 +81,7 @@ function initMethodApp() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  function postProcessMp4(u8, onLog) {
+  function postProcessMp4(u8, onLog, scale = 2) {
     try {
       const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
       let pos = 0;
@@ -138,50 +138,7 @@ function initMethodApp() {
 
       let moovBytes = u8.slice(moov.offset, moov.offset + moov.size);
 
-      // 1. Fix mvhd duration
-      const mvhdTypeIdx = findFourCC(moovBytes, 'mvhd');
-      if (mvhdTypeIdx !== -1) {
-        const ver = moovBytes[mvhdTypeIdx + 4];
-        const tsOff = mvhdTypeIdx + 4 + (ver === 1 ? 20 : 12);
-        const mvhdTimescale = readU32(moovBytes, tsOff);
-        let maxDurationSec = 0;
-        let scanPos = 0;
-        while (true) {
-          const mdhdTypeIdx = findFourCC(moovBytes, 'mdhd', scanPos);
-          if (mdhdTypeIdx === -1) break;
-          const mdhdVer = moovBytes[mdhdTypeIdx + 4];
-          const mdhdTsOff = mdhdTypeIdx + 4 + (mdhdVer === 1 ? 20 : 12);
-          const mdhdTs = readU32(moovBytes, mdhdTsOff);
-          let mdhdDur = 0;
-          if (mdhdVer === 1) {
-            const hi = readU32(moovBytes, mdhdTsOff + 4);
-            const lo = readU32(moovBytes, mdhdTsOff + 8);
-            mdhdDur = hi * 4294967296 + lo;
-          } else {
-            mdhdDur = readU32(moovBytes, mdhdTsOff + 4);
-          }
-          if (mdhdTs > 0 && mdhdDur > 0) {
-            const durSec = mdhdDur / mdhdTs;
-            if (durSec > maxDurationSec) maxDurationSec = durSec;
-          }
-          scanPos = mdhdTypeIdx + 4;
-        }
-
-        if (maxDurationSec > 0 && mvhdTimescale > 0) {
-          const realMvhdDur = Math.round(maxDurationSec * mvhdTimescale);
-          if (ver === 1) {
-            const hi = Math.floor(realMvhdDur / 4294967296);
-            const lo = (realMvhdDur % 4294967296) >>> 0;
-            writeU32(moovBytes, tsOff + 4, hi);
-            writeU32(moovBytes, tsOff + 8, lo);
-          } else {
-            writeU32(moovBytes, tsOff + 4, realMvhdDur >>> 0);
-          }
-          if (onLog) onLog(`[*] Aligned container timeline duration: ${maxDurationSec.toFixed(2)}s`);
-        }
-      }
-
-      // 2. Parse direct children of moov
+      // Parse direct children of moov
       const moovChildren = [];
       let mScan = 8;
       while (mScan + 8 <= moovBytes.length) {
@@ -192,14 +149,14 @@ function initMethodApp() {
         mScan += cSize;
       }
 
+      let mvhdBytes = null;
       let vTrak = null;
       let aTrak = null;
       const otherTraks = [];
-      let mvhdBoxBytes = null;
 
       for (const c of moovChildren) {
         if (c.type === 'mvhd') {
-          mvhdBoxBytes = c.bytes;
+          mvhdBytes = c.bytes;
         } else if (c.type === 'trak') {
           const hdlrIdx = findFourCC(c.bytes, 'hdlr');
           let hType = '';
@@ -216,7 +173,9 @@ function initMethodApp() {
         }
       }
 
-      // Process Video Track: ensure Track ID = 1, Level 5.1 in avcC, timescale x256
+      let maxDurationSec = 0;
+
+      // 1. Process Video Track: ensure Track ID = 1, Level 5.1 in avcC, scaled timescale & stts
       if (vTrak) {
         const tkhdIdx = findFourCC(vTrak, 'tkhd');
         if (tkhdIdx !== -1) {
@@ -226,70 +185,104 @@ function initMethodApp() {
         }
         const avcIdx = findFourCC(vTrak, 'avcC');
         if (avcIdx !== -1 && avcIdx + 16 <= vTrak.length) {
-          // Upgrade level indication to 0x33 (Level 5.1)
           vTrak[avcIdx + 7] = 0x33;
-          // If SPS is present, upgrade SPS level_idc to 0x33
           if (vTrak[avcIdx + 12] === 0x67) {
             vTrak[avcIdx + 15] = 0x33;
           }
         }
 
-        // RTX Timescale Trick: multiply video timescale by 256
-        // This tricks TikTok's ingest into preserving 1080p quality
-        // mdhd timescale: 60 -> 15360, duration: x256, stts delta: x256
-        const TSCALE_MULT = 256;
         const mdhdIdx = findFourCC(vTrak, 'mdhd');
+        let origTs = 60;
+        let targetTs = 15360;
         if (mdhdIdx !== -1) {
           const mdhdVer = vTrak[mdhdIdx + 4];
           const mdhdTsOff = mdhdIdx + 4 + (mdhdVer === 1 ? 20 : 12);
-          const origTs = readU32(vTrak, mdhdTsOff);
-          const newTs = origTs * TSCALE_MULT;
-          writeU32(vTrak, mdhdTsOff, newTs);
-          // Scale duration
-          if (mdhdVer === 1) {
-            const durHi = readU32(vTrak, mdhdTsOff + 4);
-            const durLo = readU32(vTrak, mdhdTsOff + 8);
-            const dur64 = BigInt(durHi) * 4294967296n + BigInt(durLo);
-            const newDur64 = dur64 * BigInt(TSCALE_MULT);
-            writeU32(vTrak, mdhdTsOff + 4, Number(newDur64 / 4294967296n) >>> 0);
-            writeU32(vTrak, mdhdTsOff + 8, Number(newDur64 % 4294967296n) >>> 0);
+          origTs = readU32(vTrak, mdhdTsOff);
+          if (origTs === 15360) {
+            targetTs = 15360;
+          } else if (origTs <= 240) {
+            targetTs = 15360;
           } else {
-            const origDur = readU32(vTrak, mdhdTsOff + 4);
-            writeU32(vTrak, mdhdTsOff + 4, (origDur * TSCALE_MULT) >>> 0);
+            targetTs = origTs;
           }
-          if (onLog) onLog('[*] Timescale upgrade: ' + origTs + ' -> ' + newTs + ' (x' + TSCALE_MULT + ')');
+          writeU32(vTrak, mdhdTsOff, targetTs);
+
+          let origDur = 0;
+          if (mdhdVer === 1) {
+            const hi = readU32(vTrak, mdhdTsOff + 4);
+            const lo = readU32(vTrak, mdhdTsOff + 8);
+            origDur = hi * 4294967296 + lo;
+          } else {
+            origDur = readU32(vTrak, mdhdTsOff + 4);
+          }
+
+          const origDurSec = origDur / origTs;
+          const newDurSec = origDurSec * scale;
+          if (newDurSec > maxDurationSec) maxDurationSec = newDurSec;
+
+          const newDur = Math.round(newDurSec * targetTs);
+          if (mdhdVer === 1) {
+            const hi = Math.floor(newDur / 4294967296);
+            const lo = (newDur % 4294967296) >>> 0;
+            writeU32(vTrak, mdhdTsOff + 4, hi);
+            writeU32(vTrak, mdhdTsOff + 8, lo);
+          } else {
+            writeU32(vTrak, mdhdTsOff + 4, newDur >>> 0);
+          }
+          if (onLog) onLog('[*] Video timescale: ' + origTs + ' -> ' + targetTs + ', duration: ' + origDurSec.toFixed(2) + 's -> ' + newDurSec.toFixed(2) + 's (' + scale + 'x scale)');
         }
 
-        // Scale stts (sample duration) deltas by TSCALE_MULT
+        const tsMult = targetTs / origTs;
         const sttsIdx = findFourCC(vTrak, 'stts');
         if (sttsIdx !== -1) {
-          const sttsEntryCount = readU32(vTrak, sttsIdx + 8);
-          for (let i = 0; i < sttsEntryCount; i++) {
-            const deltaOff = sttsIdx + 12 + i * 8 + 4;
-            if (deltaOff + 4 > vTrak.length) break;
-            const origDelta = readU32(vTrak, deltaOff);
-            writeU32(vTrak, deltaOff, (origDelta * TSCALE_MULT) >>> 0);
+          const entryCount = readU32(vTrak, sttsIdx + 8);
+          for (let i = 0; i < entryCount; i++) {
+            const dOff = sttsIdx + 12 + i * 8 + 4;
+            if (dOff + 4 > vTrak.length) break;
+            const curDelta = readU32(vTrak, dOff);
+            const newDelta = Math.round(curDelta * tsMult * scale);
+            writeU32(vTrak, dOff, newDelta >>> 0);
           }
-          if (onLog) onLog('[*] Scaled ' + sttsEntryCount + ' stts entries (delta x' + TSCALE_MULT + ')');
         }
 
-        // Scale ctts (composition time offset) if present
         const cttsIdx = findFourCC(vTrak, 'ctts');
         if (cttsIdx !== -1) {
-          const cttsEntryCount = readU32(vTrak, cttsIdx + 8);
-          for (let i = 0; i < cttsEntryCount; i++) {
-            const cOffOff = cttsIdx + 12 + i * 8 + 4;
-            if (cOffOff + 4 > vTrak.length) break;
-            const origOff = readU32(vTrak, cOffOff);
-            writeU32(vTrak, cOffOff, (origOff * TSCALE_MULT) >>> 0);
+          const entryCount = readU32(vTrak, cttsIdx + 8);
+          for (let i = 0; i < entryCount; i++) {
+            const off = cttsIdx + 12 + i * 8 + 4;
+            if (off + 4 > vTrak.length) break;
+            const curOff = readU32(vTrak, off);
+            const newOff = Math.round(curOff * tsMult * scale);
+            writeU32(vTrak, off, newOff >>> 0);
           }
         }
 
-        if (onLog) onLog('[*] Normalized Video to Track 1 (AVC High Profile Level 5.1 + RTX Timescale)');
+        const edtsIdx = findFourCC(vTrak, 'edts');
+        if (edtsIdx !== -1) {
+          const elstIdx = findFourCC(vTrak, 'elst', edtsIdx);
+          if (elstIdx !== -1) {
+            const elstVer = vTrak[elstIdx + 4];
+            const entryCount = readU32(vTrak, elstIdx + 8);
+            for (let i = 0; i < entryCount; i++) {
+              if (elstVer === 1) {
+                const segOff = elstIdx + 12 + i * 20;
+                const hi = readU32(vTrak, segOff);
+                const lo = readU32(vTrak, segOff + 4);
+                const curSeg = hi * 4294967296 + lo;
+                const newSeg = Math.round(curSeg * scale);
+                writeU32(vTrak, segOff, Math.floor(newSeg / 4294967296));
+                writeU32(vTrak, segOff + 4, (newSeg % 4294967296) >>> 0);
+              } else {
+                const segOff = elstIdx + 12 + i * 12;
+                const curSeg = readU32(vTrak, segOff);
+                writeU32(vTrak, segOff, Math.round(curSeg * scale) >>> 0);
+              }
+            }
+          }
+        }
       }
 
-      // Process Audio Track: ensure Track ID = 2
-      let aTrak2 = null;
+      // 2. Process Audio Track: ensure Track ID = 2, scale mdhd duration & stts
       if (aTrak) {
         const tkhdIdx = findFourCC(aTrak, 'tkhd');
         if (tkhdIdx !== -1) {
@@ -297,21 +290,85 @@ function initMethodApp() {
           const tidOff = tkhdIdx + 4 + (ver === 1 ? 20 : 12);
           writeU32(aTrak, tidOff, 2);
         }
-        // Dual-audio stream trick (RTX method): clone audio track to Track 3
-        // Forces TikTok ingest engine to bypass audio downmix and preserve 1080p
-        if (otherTraks.length === 0) {
-          aTrak2 = new Uint8Array(aTrak);
-          const tkhdIdx2 = findFourCC(aTrak2, 'tkhd');
-          if (tkhdIdx2 !== -1) {
-            const ver = aTrak2[tkhdIdx2 + 4];
-            const tidOff = tkhdIdx2 + 4 + (ver === 1 ? 20 : 12);
-            writeU32(aTrak2, tidOff, 3);
+
+        const mdhdIdx = findFourCC(aTrak, 'mdhd');
+        if (mdhdIdx !== -1) {
+          const mdhdVer = aTrak[mdhdIdx + 4];
+          const mdhdTsOff = mdhdIdx + 4 + (mdhdVer === 1 ? 20 : 12);
+          const audioTs = readU32(aTrak, mdhdTsOff);
+          let curDur = 0;
+          if (mdhdVer === 1) {
+            const hi = readU32(aTrak, mdhdTsOff + 4);
+            const lo = readU32(aTrak, mdhdTsOff + 8);
+            curDur = hi * 4294967296 + lo;
+          } else {
+            curDur = readU32(aTrak, mdhdTsOff + 4);
           }
-          if (onLog) onLog('[*] Injected dual-track audio channel bypass (RTX High-Definition Stream)');
+          const durSec = (curDur / audioTs) * scale;
+          if (durSec > maxDurationSec) maxDurationSec = durSec;
+
+          const newDur = Math.round(curDur * scale);
+          if (mdhdVer === 1) {
+            writeU32(aTrak, mdhdTsOff + 4, Math.floor(newDur / 4294967296));
+            writeU32(aTrak, mdhdTsOff + 8, (newDur % 4294967296) >>> 0);
+          } else {
+            writeU32(aTrak, mdhdTsOff + 4, newDur >>> 0);
+          }
+          if (onLog) onLog('[*] Audio timeline scaled: ' + (curDur / audioTs).toFixed(2) + 's -> ' + durSec.toFixed(2) + 's');
+        }
+
+        const sttsIdx = findFourCC(aTrak, 'stts');
+        if (sttsIdx !== -1) {
+          const entryCount = readU32(aTrak, sttsIdx + 8);
+          for (let i = 0; i < entryCount; i++) {
+            const dOff = sttsIdx + 12 + i * 8 + 4;
+            if (dOff + 4 > aTrak.length) break;
+            const curDelta = readU32(aTrak, dOff);
+            writeU32(aTrak, dOff, Math.round(curDelta * scale) >>> 0);
+          }
+        }
+
+        const edtsIdx = findFourCC(aTrak, 'edts');
+        if (edtsIdx !== -1) {
+          const elstIdx = findFourCC(aTrak, 'elst', edtsIdx);
+          if (elstIdx !== -1) {
+            const elstVer = aTrak[elstIdx + 4];
+            const entryCount = readU32(aTrak, elstIdx + 8);
+            for (let i = 0; i < entryCount; i++) {
+              if (elstVer === 1) {
+                const segOff = elstIdx + 12 + i * 20;
+                const curSeg = readU32(aTrak, segOff + 4);
+                writeU32(aTrak, segOff + 4, Math.round(curSeg * scale) >>> 0);
+                const curMediaTime = readU32(aTrak, segOff + 12);
+                writeU32(aTrak, segOff + 12, Math.round(curMediaTime * scale) >>> 0);
+              } else {
+                const segOff = elstIdx + 12 + i * 12;
+                const curSeg = readU32(aTrak, segOff);
+                writeU32(aTrak, segOff, Math.round(curSeg * scale) >>> 0);
+                const curMediaTime = readU32(aTrak, segOff + 4);
+                writeU32(aTrak, segOff + 4, Math.round(curMediaTime * scale) >>> 0);
+              }
+            }
+          }
         }
       }
 
-      // 3. Clean udta metadata (strip bloat, unknown cover type 0x1, te_is_reencode tag)
+      // 3. Update mvhd duration
+      if (mvhdBytes && maxDurationSec > 0) {
+        const ver = mvhdBytes[8];
+        const tsOff = 8 + 4 + (ver === 1 ? 16 : 8);
+        const mvhdTs = readU32(mvhdBytes, tsOff);
+        const realDur = Math.round(maxDurationSec * mvhdTs);
+        if (ver === 1) {
+          writeU32(mvhdBytes, tsOff + 4, Math.floor(realDur / 4294967296));
+          writeU32(mvhdBytes, tsOff + 8, (realDur % 4294967296) >>> 0);
+        } else {
+          writeU32(mvhdBytes, tsOff + 4, realDur >>> 0);
+        }
+        if (onLog) onLog('[*] Container timeline aligned: ' + maxDurationSec.toFixed(2) + 's');
+      }
+
+      // 4. Clean udta metadata (strip bloat, unknown cover type 0x1, te_is_reencode tag)
       const cleanUdta = new Uint8Array([
         0x00, 0x00, 0x00, 0x62, 0x75, 0x64, 0x74, 0x61,
         0x00, 0x00, 0x00, 0x5a, 0x6d, 0x65, 0x74, 0x61,
@@ -327,12 +384,11 @@ function initMethodApp() {
         0x4c, 0x61, 0x76, 0x66, 0x36, 0x30, 0x2e, 0x31, 0x36, 0x2e, 0x31, 0x30, 0x30
       ]);
 
-      // Build ordered moov: mvhd + vTrak + aTrak + aTrak2 + otherTraks + cleanUdta
+      // Build ordered moov: mvhd + vTrak + aTrak + cleanUdta
       const moovPieces = [];
-      if (mvhdBoxBytes) moovPieces.push(mvhdBoxBytes);
+      if (mvhdBytes) moovPieces.push(mvhdBytes);
       if (vTrak) moovPieces.push(vTrak);
       if (aTrak) moovPieces.push(aTrak);
-      if (aTrak2) moovPieces.push(aTrak2);
       for (const ot of otherTraks) moovPieces.push(ot);
       moovPieces.push(cleanUdta);
 
@@ -349,7 +405,7 @@ function initMethodApp() {
       }
       moovBytes = newMoov;
 
-      // 4. Faststart alignment: place moov right after ftyp
+      // 5. Faststart alignment: place moov right after ftyp
       const newMdatOffset = ftyp.size + moovBytes.length;
       const shift = newMdatOffset - mdat.offset;
 
@@ -663,7 +719,17 @@ function initMethodApp() {
         // Apply TikTok 1080p post-processing: Faststart (moov-first) + mvhd duration fix + clean metadata
         try {
           log('[*] Finalizing TikTok 1080p faststart alignment & clean container metadata...');
-          outputBytes = postProcessMp4(outputBytes, log);
+          const profileSelect = document.getElementById('deviceProfile');
+          let scale = 2;
+          if (profileSelect) {
+            const pVal = profileSelect.value;
+            if (pVal === '60fps' || pVal === 'auto' || pVal === 'pc' || pVal === 'phone-ghost') scale = 2;
+            else if (pVal === '120fps') scale = 6;
+            else if (pVal === '240fps') scale = 12;
+            else if (pVal === 'direct' || pVal === 'phone') scale = 1;
+          }
+          log(`[*] Applying TikTok Quality Method (scale = ${scale}x - duration stretched to preserve 1080p)...`);
+          outputBytes = postProcessMp4(outputBytes, log, scale);
           log('[✓] TikTok 1080p faststart container ready!');
         } catch (ppErr) {
           console.warn('[H4B] Post-process warning:', ppErr);

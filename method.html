@@ -165,13 +165,14 @@
     <div id="profileBox" style="background:rgba(255, 255, 255, 0.03);border:1px solid rgba(255, 255, 255, 0.1);border-radius:16px;padding:16px 20px;margin-bottom:20px">
       <label for="deviceProfile" style="display:block;color:#ffffff;font-weight:700;font-size:0.9rem;margin-bottom:8px">Posting profile</label>
       <select id="deviceProfile" style="width:100%;padding:12px 14px;border-radius:10px;background:rgba(0, 0, 0, 0.45);color:#e2e8f0;border:1px solid rgba(255, 255, 255, 0.12);font-size:0.92rem">
-        <option value="auto">Auto (detect this device)</option>
-        <option value="phone">Phone (light patch)</option>
-        <option value="phone-ghost">Phone Ghost (recommended on mobile)</option>
-        <option value="pc">PC Ghost</option>
-        <option value="variant-1">Experimental (variant 1)</option>
+        <option value="60fps" selected>⚡ 60 FPS TikTok Bypass (2x Scale - Paschafps/RTX) [Recommended]</option>
+        <option value="120fps">🚀 120 FPS TikTok Bypass (6x Scale - High Smoothness)</option>
+        <option value="240fps">💎 240 FPS TikTok Bypass (12x Scale - Extreme High FPS)</option>
+        <option value="direct">🎯 Direct 1:1 Patch (No Speed Change - Standard Faststart)</option>
       </select>
-      <div id="profileHint" style="margin-top:8px;color:#94a3b8;font-size:0.78rem;line-height:1.45"></div>
+      <div id="profileHint" style="margin-top:8px;color:#94a3b8;font-size:0.78rem;line-height:1.45">
+        💡 <strong>How it works:</strong> Doubles timeline duration to cut bitrate below TikTok's 18Mbps compression trigger. When uploading to TikTok or playing back, set speed to <strong>2.0x</strong> for 100% full 1080p quality!
+      </div>
     </div>
 
     <button type="button" id="processBtn" class="primary-action-btn" style="width:100%;padding:16px;font-size:1.05rem;border-radius:14px;cursor:pointer;justify-content:center;gap:10px">
@@ -212,6 +213,7 @@
     <div style="margin-top:24px;background:rgba(255, 255, 255, 0.03);border:1px solid rgba(255, 255, 255, 0.1);border-radius:14px;padding:16px 20px;text-align:left;font-size:0.83rem;color:#cbd5e1;line-height:1.5">
       <strong style="color:#ffffff;display:block;margin-bottom:8px;font-size:0.9rem">📌 How to avoid TikTok 540p compression:</strong>
       <ul style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px">
+        <li><strong>Speed Setting on TikTok:</strong> If using the 60 FPS (2x) method, set playback speed to <strong>2.0x</strong> in TikTok's editor before posting (or viewers set speed to 2.0x). This restores normal speed with 100% crystal-clear 1080p quality!</li>
         <li><strong>Best Upload Method:</strong> Upload via PC Desktop Browser at <a href="https://www.tiktok.com/upload" target="_blank" rel="noreferrer" style="color:#f87171;text-decoration:underline">tiktok.com/upload</a> (Bypasses aggressive mobile downscaling).</li>
         <li><strong>Mobile App Upload:</strong> On the final post screen, tap <em>More options</em> → turn <strong>ON "Allow high-quality uploads"</strong> (Default is OFF in TikTok!).</li>
         <li><strong>Orientation Check:</strong> Ensure your video is <strong>1080x1920 (9:16 Portrait)</strong>. Horizontal videos (16:9) are locked to 540p on TikTok mobile.</li>
