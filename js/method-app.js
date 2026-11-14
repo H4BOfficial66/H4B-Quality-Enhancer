@@ -698,23 +698,24 @@ function initMethodApp() {
         const inputBytes = new Uint8Array(arrayBuffer);
         log(`[✓] File loaded (${formatBytes(inputBytes.length)}). Analyzing MP4 container...`);
 
-        // Check selected device / quality profile
+        // Check selected device / quality profile (Default: 60fps 2x scale paschafps method)
         const profileSelect = document.getElementById('deviceProfile');
-        let scale = 1;
-        let addDuplicateAudio = true;
+        let scale = 2;
+        let addDuplicateAudio = false;
         if (profileSelect) {
           const pVal = profileSelect.value;
-          if (pVal === 'direct' || pVal === 'phone' || pVal === 'pc') {
+          if (pVal === 'direct') {
             scale = 1;
             addDuplicateAudio = true;
-          } else if (pVal === '60fps' || pVal === 'auto' || pVal === 'phone-ghost') {
-            scale = 2;
-            addDuplicateAudio = false;
           } else if (pVal === '120fps') {
             scale = 6;
             addDuplicateAudio = false;
           } else if (pVal === '240fps') {
             scale = 12;
+            addDuplicateAudio = false;
+          } else {
+            // 60fps, auto, pc, phone -> default 2x scale
+            scale = 2;
             addDuplicateAudio = false;
           }
         }
