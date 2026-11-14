@@ -81,7 +81,7 @@ function initMethodApp() {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 
-  function postProcessMp4(u8, onLog, scale = 2) {
+  function postProcessMp4(u8, onLog, scale = 2, addDuplicateAudio = false) {
     try {
       const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
       let pos = 0;
@@ -351,9 +351,21 @@ function initMethodApp() {
             }
           }
         }
+
+        // Clone for Track 3 (RTX Dual Audio Stream) if requested
+        if (addDuplicateAudio) {
+          aTrak2 = new Uint8Array(aTrak);
+          const tkhdIdx2 = findFourCC(aTrak2, 'tkhd');
+          if (tkhdIdx2 !== -1) {
+            const ver = aTrak2[tkhdIdx2 + 4];
+            const tidOff = tkhdIdx2 + 4 + (ver === 1 ? 20 : 12);
+            writeU32(aTrak2, tidOff, 3);
+          }
+          if (onLog) onLog('[*] Dual audio streams aligned (Track 2 + Track 3)');
+        }
       }
 
-      // 3. Update mvhd duration
+      // 3. Update mvhd duration & next_track_ID
       if (mvhdBytes && maxDurationSec > 0) {
         const ver = mvhdBytes[8];
         const tsOff = 8 + 4 + (ver === 1 ? 16 : 8);
@@ -365,6 +377,16 @@ function initMethodApp() {
         } else {
           writeU32(mvhdBytes, tsOff + 4, realDur >>> 0);
         }
+
+        if (mvhdBytes.length >= 108) {
+          const nextTrackOff = mvhdBytes.length - 4;
+          const curNext = readU32(mvhdBytes, nextTrackOff);
+          const minNext = aTrak2 ? 4 : 3;
+          if (curNext < minNext) {
+            writeU32(mvhdBytes, nextTrackOff, minNext);
+          }
+        }
+
         if (onLog) onLog('[*] Container timeline aligned: ' + maxDurationSec.toFixed(2) + 's');
       }
 
@@ -384,11 +406,12 @@ function initMethodApp() {
         0x4c, 0x61, 0x76, 0x66, 0x36, 0x30, 0x2e, 0x31, 0x36, 0x2e, 0x31, 0x30, 0x30
       ]);
 
-      // Build ordered moov: mvhd + vTrak + aTrak + cleanUdta
+      // Build ordered moov: mvhd + vTrak + aTrak + aTrak2 + cleanUdta
       const moovPieces = [];
       if (mvhdBytes) moovPieces.push(mvhdBytes);
       if (vTrak) moovPieces.push(vTrak);
       if (aTrak) moovPieces.push(aTrak);
+      if (aTrak2) moovPieces.push(aTrak2);
       for (const ot of otherTraks) moovPieces.push(ot);
       moovPieces.push(cleanUdta);
 
@@ -663,77 +686,47 @@ function initMethodApp() {
       let outputBytes = null;
 
       try {
-        if (!isV1) {
-          // Attempt Primary Next-Gen V2 Worker Pipeline
-          log('[*] Spawning V2 Worker Engine (c-CvVvisn3 WebAssembly)...');
-          try {
-            outputBytes = await runV2Worker(
-              currentFile,
-              (percent) => { log(`[*] Progress: ${percent}%`); },
-              (logMsg) => log(logMsg),
-              (stage) => { if (stage) log(`[*] Stage: ${stage}`); }
-            );
-            log('[✓] V2 Next-Gen Container Pipeline completed successfully!');
-          } catch (workerErr) {
-            log(`[!] V2 Worker Note: ${workerErr.message}. Falling back to In-Memory Remuxer...`);
+        log('[*] Reading video file into memory...');
+        const reader = new FileReader();
+        const bufferPromise = new Promise((res, rej) => {
+          reader.onload = () => res(reader.result);
+          reader.onerror = rej;
+          reader.readAsArrayBuffer(currentFile);
+        });
+
+        const arrayBuffer = await bufferPromise;
+        const inputBytes = new Uint8Array(arrayBuffer);
+        log(`[✓] File loaded (${formatBytes(inputBytes.length)}). Analyzing MP4 container...`);
+
+        // Check selected device / quality profile
+        const profileSelect = document.getElementById('deviceProfile');
+        let scale = 1;
+        let addDuplicateAudio = true;
+        if (profileSelect) {
+          const pVal = profileSelect.value;
+          if (pVal === 'direct' || pVal === 'phone' || pVal === 'pc') {
+            scale = 1;
+            addDuplicateAudio = true;
+          } else if (pVal === '60fps' || pVal === 'auto' || pVal === 'phone-ghost') {
+            scale = 2;
+            addDuplicateAudio = false;
+          } else if (pVal === '120fps') {
+            scale = 6;
+            addDuplicateAudio = false;
+          } else if (pVal === '240fps') {
+            scale = 12;
+            addDuplicateAudio = false;
           }
         }
 
-        // Secondary fallback or V1 mode
-        if (!outputBytes || outputBytes.length === 0) {
-          const reader = new FileReader();
-          const bufferPromise = new Promise((res, rej) => {
-            reader.onload = () => res(reader.result);
-            reader.onerror = rej;
-            reader.readAsArrayBuffer(currentFile);
-          });
-
-          const arrayBuffer = await bufferPromise;
-          const inputBytes = new Uint8Array(arrayBuffer);
-
-          // 1. Precision MP4 atom timing engine (lossless timing & clean AVC High profile 5.1 container)
-          // Avoids fake-frame inflation (multiplier=10) that triggers TikTok 540p downgrade
-          if (typeof window.remuxMp4Boxes === 'function') {
-            log('[*] Engaging precision MP4 atom timing engine...');
-            try {
-              outputBytes = window.remuxMp4Boxes(inputBytes, { extendTiming: false });
-              if (outputBytes && outputBytes.length > 0) {
-                log('[✓] Precision container atom optimization completed successfully!');
-              }
-            } catch (rErr) {
-              log(`[!] Remux note: ${rErr.message}`);
-            }
-          }
-
-          // 2. Secondary fallback: lossless container pass-through
-          if (!outputBytes || outputBytes.length === 0) {
-            log('[*] Preserving clean MP4 container stream...');
-            outputBytes = inputBytes;
-          }
-        }
+        log(`[*] Applying TikTok 1080p Container Pipeline (scale: ${scale}x, Faststart moov-first, Level 5.1)...`);
+        outputBytes = postProcessMp4(inputBytes, log, scale, addDuplicateAudio);
 
         if (!outputBytes || outputBytes.length === 0) {
           throw new Error('Container optimization failed. Empty output.');
         }
 
-        // Apply TikTok 1080p post-processing: Faststart (moov-first) + mvhd duration fix + clean metadata
-        try {
-          log('[*] Finalizing TikTok 1080p faststart alignment & clean container metadata...');
-          const profileSelect = document.getElementById('deviceProfile');
-          let scale = 2;
-          if (profileSelect) {
-            const pVal = profileSelect.value;
-            if (pVal === '60fps' || pVal === 'auto' || pVal === 'pc' || pVal === 'phone-ghost') scale = 2;
-            else if (pVal === '120fps') scale = 6;
-            else if (pVal === '240fps') scale = 12;
-            else if (pVal === 'direct' || pVal === 'phone') scale = 1;
-          }
-          log(`[*] Applying TikTok Quality Method (scale = ${scale}x - duration stretched to preserve 1080p)...`);
-          outputBytes = postProcessMp4(outputBytes, log, scale);
-          log('[✓] TikTok 1080p faststart container ready!');
-        } catch (ppErr) {
-          console.warn('[H4B] Post-process warning:', ppErr);
-        }
+        log('[✓] TikTok 1080p container processing complete!');
 
         // Increment global counter
         fetch('/api/counter/up').catch(() => {});
